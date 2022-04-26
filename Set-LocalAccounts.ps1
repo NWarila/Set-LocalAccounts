@@ -1,4 +1,13 @@
-﻿Function Update-User {
+﻿
+
+
+#region ------- [ Bitlocker Actions ] -----------------------------------------------------------------------------
+[string]$NameGenMethod = 'LAPS'
+
+
+#endregion ---- [Configure Bitlocker],#')}]#")}]#'")}] ------------------------------------------------------------
+
+Function Update-User {
     [CmdletBinding(
             ConfirmImpact="None",
             DefaultParameterSetName="Site",
@@ -222,6 +231,10 @@
         New-Variable -Force -Name:'LocalUser' -Value:(New-Object -TypeName:'ADSI' -ArgumentList:"WinNT://$($WorkgroupDomain)$($Env:ComputerName)/$($sAMAccountName),user")
     }
 
+    Write-Debug -Message:"========================================================================================"
+    Write-Debug -Message:"Processing User: $sAMAccountName"
+    Write-Debug -Message:"========================================================================================"
+
     #Universal function for updating account properties.
     New-Variable -Name:'ApplyChanges' -Value:([scriptblock]::Create({
         $LocalUser.CommitChanges()
@@ -239,40 +252,41 @@
         & $ApplyChanges
     }
 
-    New-Variable -Name:'UpdateFlag' -Value:([scriptblock]::Create({
-        Param ($Expression,$InitialFlags,$Action,$Flag)
-
-        If ([Boolean]($LocalUser.UserFlags.value -BAND $Flag)) {
-            If ($Action -eq 'Add') {
-                Write-Verbose -Message:"UserFlags already set properly for userFlag '$flag'"
-            } Else {
-                Invoke-Command -ScriptBlock:([ScriptBlock]::Create($Expression)) -NoNewScope -Verbose
-            }
-        } Else {
-            Write-Verbose -Message:"$($Action.trim('e'))ing flag '$flag' to $($LocalUser.name)"
-            Invoke-Command -ScriptBlock:([ScriptBlock]::Create($Expression)) -NoNewScope -Verbose
-        }
-
-        & $ApplyChanges
-        if ($LocalUser.UserFlags.Value -eq $StartingValue) {
-            Write-Warning -Message:"Unable to $Action flag '$flag'."
-        } else {
-            Write-Verbose -Message:"Successfully $Action`ed flag '$flag'."
-        }
-    }))
-
     #Update userFlag values.
     If ($SetFlag) {
         $LocalUser.Put('userflags', $Flag)
         & $ApplyChanges
     } ElseIf (($AddFlags.Count + $RemoveFlags.Count) -gt 0) {
-        New-Variable -Name:'InitalFlag' -Value $LocalUser.UserFlags[0]
         ForEach ($Action in @('Add','Remove')) {
             ForEach ($Flag in (Get-Variable -Name:("$($Action)Flags") -ValueOnly)) {
-                If ($Action -eq 'Add') {
-                    & $UpdateFlag {$LocalUser.Put('userflags', ($LocalUser.UserFlags[0] -BOR $Flag))} $LocalUser.UserFlags[0] $Action $Flag
+                #Initalize Variables
+                Set-Variable -Name:'_Changes' -Value:'0' -Force
+
+                Write-Debug -Message:"Action: $Action; Flag: $Flag;"
+                If ([Bool]($LocalUser.UserFlags.value -BAND $Flag)) {
+                    If ($Action -eq 'Add') {
+                        Write-Debug -Message:"Status: Action is add, but flag is already present."
+                    } Else {
+                        $LocalUser.UserFlags.value = ($LocalUser.UserFlags.value -BXOR $Flag)
+                        $LocalUser.SetInfo()
+                        If ([Bool]($LocalUser.UserFlags.value -BAND $Flag)) {
+                            Write-Warning -Message:"Failed to add flag; $Flag [$($LocalUser.UserFlags.Value)]"
+                        } Else {
+                            Write-Debug -Message:"Successfully added flag; $Flag [$($LocalUser.UserFlags.Value)]"
+                        }
+                    }
                 } Else {
-                    & $UpdateFlag {$LocalUser.Put('userflags', ($LocalUser.UserFlags[0] -BXOR $Flag))} $LocalUser.UserFlags[0] $Action $Flag
+                    IF ($Action -eq "Remove") {
+                        Write-Debug -Message:"Status: Action is remove, but flag isn't present."
+                    } Else {
+                        $LocalUser.UserFlags.value = $LocalUser.UserFlags.value -BOR $Flag
+                        $LocalUser.SetInfo()
+                        If ([Bool]($LocalUser.UserFlags.value -BAND $Flag)) {
+                            Write-Debug -Message:"Successfully removed flag; $Flag [$($LocalUser.UserFlags.Value)]"
+                        } Else {
+                            Write-Warning -Message:"Failed to remove flag; $Flag [$($LocalUser.UserFlags.Value)]"
+                        }
+                    }
                 }
             }
         }
@@ -317,6 +331,7 @@
         }
     }
 }
+
 Function Start-CimQuery {
     [CmdletBinding(
         ConfirmImpact = 'None',
@@ -347,7 +362,7 @@ Function Start-CimQuery {
     Write-Debug -Message:("Step $Step` Initalizing Variables Variables"); $Step++
     @('Result') | ForEach-Object { New-Variable -Name:$_ -Value:$Null }
     New-Variable -Name:'CimInstSplat' -Value:(@{'Property' = $Property; 'NameSpace' = $NameSpace })
-    New-Variable -Name:'CimProperties' -Value:@('ClassName', 'NameSpace', 'CimSession', 'Property')
+    New-Variable -Name:'CimProperties' -Value:@('ClassName', 'NameSpace', 'CimSession', 'Property','Filter')
 
 
     Write-Debug -Message:('Step $Step: Quickstep Check.'); $Step++
@@ -359,7 +374,7 @@ Function Start-CimQuery {
                     $Param.Key, $Param.Value)
                 $CimInstSplat[$Param.Key] = $Param.Value
             } Else {
-                Write-Warning -Message:'CimProperty {0} does not match a valid CimSession property.'
+                Write-Warning -Message:('CimProperty {0} does not match a valid CimSession property.' -f  $Param.Key)
             }
         }
         $Null = $PSBoundParameters.Remove('QuickSetup')
@@ -411,8 +426,8 @@ Function Start-CimQuery {
     Return $Result
 }
 
-New-Variable -Force -Name:'NVSplat' -Value:@{'Verbose' = $Verbose; Force = $True }
-New-Variable -Force -Name:'NameValidation' -Value:"^[a-z0-9\ \(\)\.\_\~\'\{\}\|\$\!\@\#\%\^\&\-\`]{1,20}$"
+New-Variable -Force -Name:'NVSplat' -Value:@{'Verbose' = $False; Force = $True }
+New-Variable -Force -Name:'NameValidation' -Value:"^[a-z0-9\ \(\)\._\~\'\{\}\|\$\!\@\#\%\^\-\`\&]{1,20}$"
 
 #Initialize Variables
 @('LocalCimSession', 'ComputerSystem', 'Users', 'AdminAccountName') | ForEach-Object {
@@ -463,8 +478,8 @@ If ($ComputerSystem.DomainRole -in @(1,3)) {
                         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft Services\AdmPwd\'
                     )
                 )
-                If ($LAPSPolicies.Contains('AdminAccountName')) {
-                    If ([String]::IsNullOrEmpty($LAPSPolicies.Contains('AdminAccountName'))) {
+                If ($LAPSPolicies.PSObject.Properties.name -contains 'AdminAccountName') {
+                    If (-Not [String]::IsNullOrEmpty($LAPSPolicies.AdminAccountName)) {
                         If ($LAPSPolicies.AdminAccountName -match $NameValidation) {
                             $AdminAccountName = $LAPSPolicies.AdminAccountName
                         } Else {
@@ -498,7 +513,7 @@ If ($ComputerSystem.DomainRole -in @(1,3)) {
 
     #Create and configure LocalAdmin
     If (-NOT [String]::IsNullOrEmpty($AdminAccountName)) {
-        Update-User -UserName:$AdminAccountName -CreateIfNot -AddGroups:'Administrators', 'Users' -RemoveFlags:(
+        Update-User -UserName:$AdminAccountName -CreateIfNot -AddGroups:('Administrators','Users') -RemoveFlags:(
             '2', '8', '16', '32', '64', '65536', '262144', '8388608')
     } Else {
         Throw "AdminAccountName is null or empty. Appears no valid AdminAccountName could be determined."
